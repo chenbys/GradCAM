@@ -1,0 +1,4 @@
+.idea
+*.csv
+*.npy
+__pycache__
