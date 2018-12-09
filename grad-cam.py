@@ -7,6 +7,12 @@ import cv2
 import sys
 import numpy as np
 import argparse
+from datahelper import imgnet_classes
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 class FeatureExtractor():
@@ -69,12 +75,17 @@ def preprocess_image(img):
     return input
 
 
-def show_cam_on_image(img, mask, save_fname="results/cam.jpg"):
-    heatmap = cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)
+def show_cam_on_image(img, mask, save_fname="results/CAM.jpg"):
+    heatmap = cv2.applyColorMap(np.uint8(255 * cv2.resize(mask, (224, 224))), cv2.COLORMAP_JET)
     heatmap = np.float32(heatmap) / 255
     cam = heatmap + np.float32(img)
     cam = cam / np.max(cam)
     cv2.imwrite(save_fname, np.uint8(255 * cam))
+
+    df = pd.DataFrame(mask)
+    sns.heatmap(df)
+    plt.savefig(save_fname.replace('CAM', 'Heatmap'))
+    plt.close()
 
 
 class GradCam:
@@ -98,8 +109,10 @@ class GradCam:
             features, output = self.extractor(input)
 
         if index == None:
+            noutput = output.cpu().data.numpy()[0]
+            topk_idxs = noutput.argsort()[-5:]
             index = np.argmax(output.cpu().data.numpy())
-
+            d = 1
         # one_hot = np.zeros((1, output.size()[-1]), dtype=np.float32)
         # one_hot[0][index] = 1
         # one_hot = Variable(torch.from_numpy(one_hot), requires_grad=True)  # [1,1k]
@@ -125,8 +138,8 @@ class GradCam:
         for i, w in enumerate(weights):
             cam += w * target[i, :, :]
 
-        cam = np.maximum(cam, 0)
-        cam = cv2.resize(cam, (224, 224))
+        # cam = np.maximum(cam, 0)
+        # cam = cv2.resize(cam, (224, 224))
         cam = cam - np.min(cam)
         cam = cam / np.max(cam)
         return cam
@@ -192,14 +205,13 @@ class GuidedBackpropReLUModel:
 
         output = input.grad.cpu().data.numpy()
         output = output[0, :, :, :]
-
         return output
 
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--use-cuda', action='store_true', default=False)
-    parser.add_argument('--image-path', type=str, default='./examples/000001.jpg')
+    parser.add_argument('--image-path', type=str, default='./examples/000004.jpg')
     args = parser.parse_args()
     args.use_cuda = args.use_cuda and torch.cuda.is_available()
     return args
@@ -214,21 +226,26 @@ if __name__ == '__main__':
     img = np.float32(cv2.resize(img, (224, 224))) / 255
     input = preprocess_image(img)
 
+    # Find tok and plot
+    noutput = grad_cam.forward(input).cpu().data.numpy()[0]
+    topk_idxs = noutput.argsort()[-5:][::-1]
+    print(noutput[topk_idxs])
     # If None, returns the map for the highest scoring category.
     # Otherwise, targets the requested index.
-    target_index = None
+    # target_index = None
+    for topl, target_index in enumerate(topk_idxs):
+        print(f'{topl}:{imgnet_classes[target_index]}')
+        mask = grad_cam(input, target_index)
+        show_cam_on_image(img, mask, save_fname=f'results/{img_name}@{topl}@Class{target_index:03}@CAM.jpg')
 
-    mask = grad_cam(input, target_index)
+        gb_model = GuidedBackpropReLUModel(model=models.vgg19(pretrained=True), use_cuda=args.use_cuda)
+        gb = gb_model(input, index=target_index)
+        utils.save_image(torch.from_numpy(gb), f'results/{img_name}@{topl}@Class{target_index:03}@GBP.jpg')
 
-    show_cam_on_image(img, mask, save_fname=f'results/{img_name}@CAM.jpg')
+        cam_mask = np.zeros(gb.shape)
+        mask_resize = cv2.resize(mask, (224, 224))
+        for i in range(0, gb.shape[0]):
+            cam_mask[i, :, :] = mask_resize
 
-    gb_model = GuidedBackpropReLUModel(model=models.vgg19(pretrained=True), use_cuda=args.use_cuda)
-    gb = gb_model(input, index=target_index)
-    utils.save_image(torch.from_numpy(gb), f'results/{img_name}@GBP.jpg')
-
-    cam_mask = np.zeros(gb.shape)
-    for i in range(0, gb.shape[0]):
-        cam_mask[i, :, :] = mask
-
-    cam_gb = np.multiply(cam_mask, gb)
-    utils.save_image(torch.from_numpy(cam_gb), f'results/{img_name}@RES.jpg')
+        cam_gb = np.multiply(cam_mask, gb)
+        utils.save_image(torch.from_numpy(cam_gb), f'results/{img_name}@{topl}@Class{target_index:03}@RES.jpg')
